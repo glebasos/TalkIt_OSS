@@ -8,6 +8,14 @@
  * without guessing at internal layouts. The reconstructed SoftVoice surface
  * lives in svapi.h and keeps its original shapes.
  *
+ * TABLES
+ * ------
+ * The rule tables and synthesis coefficients belong to SoftVoice, Inc. and are
+ * read from the user's own copies of the original DLLs. A build configured
+ * with them (-DTISPEECH_*_DLL) has them compiled in. Any build can instead be
+ * given them at run time with tispeech_load_dlls(); everything below then
+ * reports and uses what was loaded.
+ *
  * HONESTY CONTRACT
  * ----------------
  * tispeech_capabilities() reports what this build can really do. A caller must
@@ -43,6 +51,7 @@ extern "C" {
 #define TISPEECH_E_OUTOFMEMORY  0x1b5a
 #define TISPEECH_E_NOTIMPL      0xF001
 #define TISPEECH_E_BUFFERFULL   0xF002
+#define TISPEECH_E_BADDLL       0xF003 /* unreadable or unsupported original DLL */
 
 /* Language selector; same bit values as SV_LANG_* in svapi.h. */
 #define TISPEECH_LANG_ENGLISH   0x1u
@@ -53,16 +62,35 @@ extern "C" {
 #define TISPEECH_CAP_TEXT_TO_PHONEMES 0x1u /* text conversion is built */
 #define TISPEECH_CAP_SYNTHESIS        0x2u /* phoneme -> PCM works end to end */
 
+/*
+ * Read the tables from the original DLLs in `dir`: TIBASE32.DLL (synthesis),
+ * TIENG32.DLL (English) and TISPAN32.DLL (Spanish, which also needs
+ * TIENG32.DLL), matched case-insensitively. Any subset may be present. The
+ * DLLs are parsed as files; they are never loaded or executed, and they are
+ * not needed after this returns.
+ *
+ * Returns TISPEECH_OK, TISPEECH_E_NOLANGUAGE when `dir` holds none of them, or
+ * TISPEECH_E_BADDLL when one cannot be read or is not the build the
+ * reconstruction was made from. On failure the tables in use are unchanged.
+ * Loading replaces any tables loaded or compiled in before; it must not
+ * overlap another call into this library.
+ */
+TISPEECH_API int32_t tispeech_load_dlls(const char *dir);
+
+/* The same, with each DLL's path given separately; NULL skips that one. */
+TISPEECH_API int32_t tispeech_load_dll_files(const char *tibase32, const char *tieng32,
+                                             const char *tispan32);
+
 /* Bitmask of TISPEECH_CAP_*. Cheap, side-effect free, safe to call first. */
 TISPEECH_API uint32_t tispeech_capabilities(void);
 
-/* Bitmask of TISPEECH_LANG_* whose rule data was compiled into this build.
- * Zero when the build was configured without an original language DLL. */
+/* Bitmask of TISPEECH_LANG_* whose rule data is available, compiled in or
+ * loaded. Zero until a language DLL is supplied one way or the other. */
 TISPEECH_API uint32_t tispeech_languages(void);
 
 /* Bitmask of TISPEECH_LANG_* that tispeech_synthesize() accepts. Zero unless
  * TISPEECH_CAP_SYNTHESIS is set; Spanish needs TISPAN32 as well as TIBASE32
- * and TIENG32 at build time. */
+ * and TIENG32. */
 TISPEECH_API uint32_t tispeech_synthesis_languages(void);
 
 /* Human-readable build description, for logs and the about box. Static

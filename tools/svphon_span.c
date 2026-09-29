@@ -42,6 +42,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "svphon_span: sv_langmod_init failed\n");
         return 1;
     }
+    span.lts = &sv_lang_data_span;
     if (sv_langgen_attach(&span, &li, sv_span_image_text, sv_span_image_text_count)) {
         fprintf(stderr, "svphon_span: sv_langgen_attach failed\n");
         return 1;

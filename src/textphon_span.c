@@ -1396,10 +1396,10 @@ static int fe_init(fe_t *fe, const sv_langmod *m)
 {
     memset(fe, 0, sizeof *fe);
     fe->g = (sv_langgen *)m->priv;
-    if (!fe->g)
+    if (!fe->g || !m->lts)
         return -1;
-    fe->rules = sv_lang_data_span;
-    fe->cls = sv_lang_data_span.charclass;
+    fe->rules = *m->lts;
+    fe->cls = m->lts->charclass;
     return 0;
 }
 

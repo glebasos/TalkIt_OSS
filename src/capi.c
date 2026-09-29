@@ -9,102 +9,317 @@
  */
 
 #include "tispeech/capi.h"
+#include "tispeech/dllload.h"
 #include "tispeech/narrate.h"
 #include "tispeech/ruleset.h"
+#include "tispeech/textphon_span.h"
 #include "tispeech/userdict.h"
-#ifdef TISPEECH_HAVE_FRONTEND_SPAN
-#  include "tispeech/textphon_span.h"
-#endif
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#  include <dirent.h>
+#  include <strings.h>
+#endif
+
+/* ------------------------------------------------------------------------ */
+/* Where the tables come from.                                              */
+/*                                                                          */
+/* A build configured with the original DLLs has them compiled in (the      */
+/* TISPEECH_HAVE_* definitions below); a build without them gets them from  */
+/* tispeech_load_dlls() at run time. Loaded tables take precedence.         */
+/* ------------------------------------------------------------------------ */
+
+typedef struct {
+    const sv_ruleset_t *rules_eng, *rules_span;  /* letter-to-sound */
+    const sv_lang_image *eng;                    /* English module (TIENG32) */
+    const sv_lang_image *span;                   /* Spanish module (both DLLs) */
+    const sv_frame_tables *frames;               /* TIBASE32, with the two below */
+    const sv_expr_tables *expr;
+    sv_image base_image;
+} tables;
 
 #ifdef TISPEECH_HAVE_ENG
-#  define TISPEECH_ENG_BUILT TISPEECH_LANG_ENGLISH
-#else
-#  define TISPEECH_ENG_BUILT 0u
+extern const uint8_t sv_eng_image[];
+extern const uint32_t sv_eng_image_va, sv_eng_image_size;
+extern const uint32_t sv_eng_image_desc[10];
+extern const sv_image sv_eng_image_text[];
+extern const size_t sv_eng_image_text_count;
+#endif
+#ifdef TISPEECH_HAVE_FRONTEND_SPAN
+extern const uint8_t sv_span_image[];
+extern const uint32_t sv_span_image_va, sv_span_image_size;
+extern const uint32_t sv_span_desc_image_desc[10];
+extern const sv_image sv_span_image_text[];
+extern const size_t sv_span_image_text_count;
+#endif
+#ifdef TISPEECH_HAVE_SYNTH_ENG
+extern const uint8_t sv_base_image[];
+extern const uint32_t sv_base_image_va, sv_base_image_size;
+extern const sv_frame_tables sv_base_tables;
+extern const sv_expr_tables sv_base_tables_expression;
+#endif
+
+/* The compiled-in tables, as the same structures the loader fills. */
+static void compiled_tables(tables *t, sv_lang_image *eng, sv_lang_image *span)
+{
+    memset(t, 0, sizeof *t);
+#ifdef TISPEECH_HAVE_ENG
+    t->rules_eng = &sv_lang_data_eng;
+    eng->image = (sv_image){sv_eng_image, sv_eng_image_va, sv_eng_image_size};
+    memcpy(eng->desc, sv_eng_image_desc, sizeof eng->desc);
+    eng->text_count = sv_eng_image_text_count < 2 ? sv_eng_image_text_count : 2;
+    memcpy(eng->text, sv_eng_image_text, eng->text_count * sizeof *eng->text);
+    t->eng = eng;
 #endif
 #ifdef TISPEECH_HAVE_SPAN
-#  define TISPEECH_SPAN_BUILT TISPEECH_LANG_SPANISH
-#else
-#  define TISPEECH_SPAN_BUILT 0u
+    t->rules_span = &sv_lang_data_span;
 #endif
-#define TISPEECH_LANGS_BUILT (TISPEECH_ENG_BUILT | TISPEECH_SPAN_BUILT)
+#ifdef TISPEECH_HAVE_FRONTEND_SPAN
+    span->image = (sv_image){sv_span_image, sv_span_image_va, sv_span_image_size};
+    memcpy(span->desc, sv_span_desc_image_desc, sizeof span->desc);
+    span->text_count = sv_span_image_text_count < 2 ? sv_span_image_text_count : 2;
+    memcpy(span->text, sv_span_image_text, span->text_count * sizeof *span->text);
+    t->span = span;
+#endif
+#ifdef TISPEECH_HAVE_SYNTH_ENG
+    t->frames = &sv_base_tables;
+    t->expr = &sv_base_tables_expression;
+    t->base_image = (sv_image){sv_base_image, sv_base_image_va, sv_base_image_size};
+#endif
+    (void)eng;
+    (void)span;
+}
+
+/* Tables read from the DLLs by tispeech_load_dll_files(). */
+typedef struct {
+    sv_arena arena;
+    int has_rules_eng, has_rules_span, has_eng, has_span, has_base;
+    sv_ruleset_t rules_eng, rules_span;
+    sv_lang_image eng, span;
+    sv_base_data base;
+} loaded_tables;
+
+static loaded_tables *g_loaded;
+
+/* Snapshot of the tables in use; `eng` and `span` back the compiled-in case. */
+static void current_tables(tables *t, sv_lang_image *eng, sv_lang_image *span)
+{
+    const loaded_tables *l = g_loaded;
+    if (!l) {
+        compiled_tables(t, eng, span);
+        return;
+    }
+    memset(t, 0, sizeof *t);
+    t->rules_eng = l->has_rules_eng ? &l->rules_eng : NULL;
+    t->rules_span = l->has_rules_span ? &l->rules_span : NULL;
+    t->eng = l->has_eng ? &l->eng : NULL;
+    t->span = l->has_span ? &l->span : NULL;
+    if (l->has_base) {
+        t->frames = &l->base.frames;
+        t->expr = &l->base.expr;
+        t->base_image = l->base.image;
+    }
+}
+
+#define CURRENT_TABLES(t) \
+    tables t; \
+    sv_lang_image t##_eng, t##_span; \
+    current_tables(&t, &t##_eng, &t##_span)
+
+static uint32_t text_languages(const tables *t)
+{
+    return (t->rules_eng ? TISPEECH_LANG_ENGLISH : 0u)
+         | (t->rules_span ? TISPEECH_LANG_SPANISH : 0u);
+}
+
+static uint32_t synth_languages(const tables *t)
+{
+    if (!t->frames)
+        return 0;
+    return (t->eng ? TISPEECH_LANG_ENGLISH : 0u) | (t->span ? TISPEECH_LANG_SPANISH : 0u);
+}
 
 uint32_t tispeech_capabilities(void)
 {
+    CURRENT_TABLES(t);
     uint32_t caps = 0;
-    if (TISPEECH_LANGS_BUILT != 0)
+    if (text_languages(&t) != 0)
         caps |= TISPEECH_CAP_TEXT_TO_PHONEMES;
-#ifdef TISPEECH_HAVE_SYNTH_ENG
     /* Phoneme string -> PCM, verified sample-exact against the original
      * engine (tools/verify_narrate.py, tools/verify_spanish.py). Which
      * languages: tispeech_synthesis_languages(). */
-    caps |= TISPEECH_CAP_SYNTHESIS;
-#endif
+    if (synth_languages(&t) != 0)
+        caps |= TISPEECH_CAP_SYNTHESIS;
     return caps;
 }
 
 uint32_t tispeech_languages(void)
 {
-    return (uint32_t)TISPEECH_LANGS_BUILT;
+    CURRENT_TABLES(t);
+    return text_languages(&t);
 }
-
-#ifdef TISPEECH_HAVE_SYNTH_SPAN
-#  define TISPEECH_SYNTH_SPAN_BUILT TISPEECH_LANG_SPANISH
-#else
-#  define TISPEECH_SYNTH_SPAN_BUILT 0u
-#endif
-#ifdef TISPEECH_HAVE_SYNTH_ENG
-#  define TISPEECH_SYNTH_BUILT (TISPEECH_LANG_ENGLISH | TISPEECH_SYNTH_SPAN_BUILT)
-#else
-#  define TISPEECH_SYNTH_BUILT 0u
-#endif
 
 uint32_t tispeech_synthesis_languages(void)
 {
-    return (uint32_t)TISPEECH_SYNTH_BUILT;
+    CURRENT_TABLES(t);
+    return synth_languages(&t);
 }
-
-#if defined(TISPEECH_HAVE_SYNTH_SPAN)
-#  define SYNTH_INFO "synthesis: English, Spanish"
-#elif defined(TISPEECH_HAVE_SYNTH_ENG)
-#  define SYNTH_INFO "synthesis: English"
-#else
-#  define SYNTH_INFO "synthesis: not built (needs TIBASE32 and TIENG32)"
-#endif
 
 const char *tispeech_build_info(void)
 {
-#if defined(TISPEECH_HAVE_FRONTEND_SPAN)
-    return "tispeech native reconstruction; text front end: English, Spanish; "
-           SYNTH_INFO;
-#elif defined(TISPEECH_HAVE_ENG) && defined(TISPEECH_HAVE_SPAN)
-    return "tispeech native reconstruction; text front end: English; letter-to-sound: Spanish; "
-           SYNTH_INFO;
-#elif defined(TISPEECH_HAVE_ENG)
-    return "tispeech native reconstruction; text front end: English; "
-           SYNTH_INFO;
-#elif defined(TISPEECH_HAVE_SPAN)
-    return "tispeech native reconstruction; letter-to-sound: Spanish; "
-           SYNTH_INFO;
-#else
-    return "tispeech native reconstruction; letter-to-sound: no language data "
-           "compiled in; " SYNTH_INFO;
-#endif
+    /* Indexed by text_languages(), with 4 for the Spanish front end, and by
+     * which languages synthesise; every combination is a string literal so the
+     * result stays static storage. */
+    static const char *const info[5][3] = {
+#define INFO(front) { \
+        "tispeech native reconstruction; " front \
+        "synthesis: not built (needs TIBASE32 and TIENG32)", \
+        "tispeech native reconstruction; " front "synthesis: English", \
+        "tispeech native reconstruction; " front "synthesis: English, Spanish" }
+        INFO("letter-to-sound: no language data compiled in or loaded; "),
+        INFO("text front end: English; "),
+        INFO("letter-to-sound: Spanish; "),
+        INFO("text front end: English; letter-to-sound: Spanish; "),
+        INFO("text front end: English, Spanish; "),
+#undef INFO
+    };
+    CURRENT_TABLES(t);
+    uint32_t sl = synth_languages(&t);
+    int front = t.span && t.rules_span ? 4 : (int)text_languages(&t);
+    return info[front][sl & TISPEECH_LANG_SPANISH ? 2 : sl ? 1 : 0];
 }
 
-static const sv_ruleset_t *ruleset_for(uint32_t language)
+/* ------------------------------------------------------------------------ */
+/* Run-time loading.                                                        */
+/* ------------------------------------------------------------------------ */
+
+static void loaded_free(loaded_tables *l)
 {
-#ifdef TISPEECH_HAVE_ENG
+    if (l) {
+        sv_arena_free(&l->arena);
+        free(l);
+    }
+}
+
+static int load_all(loaded_tables *l, const char *tibase32, const char *tieng32,
+                    const char *tispan32, sv_pe *base, sv_pe *eng, sv_pe *span)
+{
+    if ((tibase32 && sv_pe_open(base, tibase32)) || (tieng32 && sv_pe_open(eng, tieng32))
+        || (tispan32 && sv_pe_open(span, tispan32)))
+        return -1;
+    if (tibase32) {
+        if (sv_load_base(base, &l->arena, &l->base))
+            return -1;
+        l->has_base = 1;
+    }
+    if (tieng32) {
+        if (sv_load_rules(eng, 0, &l->arena, &l->rules_eng)
+            || sv_load_eng_image(eng, &l->arena, &l->eng))
+            return -1;
+        l->has_rules_eng = l->has_eng = 1;
+    }
+    if (tispan32) {
+        if (sv_load_rules(span, 1, &l->arena, &l->rules_span))
+            return -1;
+        l->has_rules_span = 1;
+    }
+    /* The Spanish module runs on TIENG32's frame generator (langgen.c). */
+    if (tieng32 && tispan32) {
+        if (sv_load_span_image(eng, span, &l->arena, &l->span))
+            return -1;
+        l->has_span = 1;
+    }
+    return 0;
+}
+
+int32_t tispeech_load_dll_files(const char *tibase32, const char *tieng32,
+                                const char *tispan32)
+{
+    sv_pe base = {0}, eng = {0}, span = {0};
+    loaded_tables *l;
+    int rc;
+
+    if (!tibase32 && !tieng32 && !tispan32)
+        return TISPEECH_E_BADPARAM;
+    l = calloc(1, sizeof *l);
+    if (!l)
+        return TISPEECH_E_OUTOFMEMORY;
+    rc = load_all(l, tibase32, tieng32, tispan32, &base, &eng, &span);
+    sv_pe_close(&base);
+    sv_pe_close(&eng);
+    sv_pe_close(&span);
+    if (rc) {
+        loaded_free(l);
+        return TISPEECH_E_BADDLL;
+    }
+    loaded_free(g_loaded);
+    g_loaded = l;
+    return TISPEECH_OK;
+}
+
+/* `dir`/`name`, matching the name case-insensitively where the file system
+ * does not. NULL if there is no such file. */
+static char *find_file(const char *dir, const char *name)
+{
+    size_t n = strlen(dir);
+    char *path = malloc(n + strlen(name) + 2);
+    if (!path)
+        return NULL;
+    memcpy(path, dir, n);
+    path[n] = '/';
+    strcpy(path + n + 1, name);
+#ifdef _WIN32
+    {
+        FILE *f = fopen(path, "rb");
+        if (f) {
+            fclose(f);
+            return path;
+        }
+    }
+#else
+    {
+        DIR *d = opendir(dir);
+        struct dirent *e;
+        while (d && (e = readdir(d)) != NULL) {
+            if (strlen(e->d_name) == strlen(name) && strcasecmp(e->d_name, name) == 0) {
+                strcpy(path + n + 1, e->d_name);
+                closedir(d);
+                return path;
+            }
+        }
+        if (d)
+            closedir(d);
+    }
+#endif
+    free(path);
+    return NULL;
+}
+
+int32_t tispeech_load_dlls(const char *dir)
+{
+    char *base, *eng, *span;
+    int32_t rc;
+    if (dir == NULL)
+        return TISPEECH_E_BADPARAM;
+    base = find_file(dir, "TIBASE32.DLL");
+    eng = find_file(dir, "TIENG32.DLL");
+    span = find_file(dir, "TISPAN32.DLL");
+    rc = base || eng || span ? tispeech_load_dll_files(base, eng, span)
+                             : TISPEECH_E_NOLANGUAGE;
+    free(base);
+    free(eng);
+    free(span);
+    return rc;
+}
+
+static const sv_ruleset_t *ruleset_for(const tables *t, uint32_t language)
+{
     if (language == TISPEECH_LANG_ENGLISH)
-        return &sv_lang_data_eng;
-#endif
-#ifdef TISPEECH_HAVE_SPAN
+        return t->rules_eng;
     if (language == TISPEECH_LANG_SPANISH)
-        return &sv_lang_data_span;
-#endif
-    (void)language;
+        return t->rules_span;
     return NULL;
 }
 
@@ -156,64 +371,35 @@ static int32_t normalise(const char *text, char **out, int frontend)
     return TISPEECH_OK;
 }
 
-#ifdef TISPEECH_HAVE_ENG
-extern const uint8_t sv_eng_image[];
-extern const uint32_t sv_eng_image_va, sv_eng_image_size;
-extern const uint32_t sv_eng_image_desc[10];
-extern const sv_image sv_eng_image_text[];
-extern const size_t sv_eng_image_text_count;
-#endif
-#ifdef TISPEECH_HAVE_FRONTEND_SPAN
-extern const uint8_t sv_span_image[];
-extern const uint32_t sv_span_image_va, sv_span_image_size;
-extern const uint32_t sv_span_desc_image_desc[10];
-extern const sv_image sv_span_image_text[];
-extern const size_t sv_span_image_text_count;
-#endif
-
 /* Languages with a reconstructed front end (SVTextToPhon plus the module's
  * word translator); the others fall back to the letter-to-sound matcher. */
-static int has_frontend(uint32_t language)
+static int has_frontend(const tables *t, uint32_t language)
 {
-#ifdef TISPEECH_HAVE_ENG
     if (language == TISPEECH_LANG_ENGLISH)
-        return 1;
-#endif
-#ifdef TISPEECH_HAVE_FRONTEND_SPAN
+        return t->eng != NULL;
     if (language == TISPEECH_LANG_SPANISH)
-        return 1;
-#endif
-    (void)language;
+        return t->span != NULL && t->rules_span != NULL;
     return 0;
 }
 
-#if defined(TISPEECH_HAVE_ENG) || defined(TISPEECH_HAVE_FRONTEND_SPAN)
 /* LoadLanguage for one module, with its generator and duration rules.
  * sv_langgen_detach() releases it. */
-static int32_t lang_open(uint32_t language, sv_langmod *m)
+static int32_t lang_open(const tables *t, uint32_t language, sv_langmod *m)
 {
+    const sv_lang_image *li = language == TISPEECH_LANG_ENGLISH ? t->eng
+                            : language == TISPEECH_LANG_SPANISH ? t->span : NULL;
     memset(m, 0, sizeof *m);
-#ifdef TISPEECH_HAVE_ENG
+    if (li == NULL || sv_langmod_init(m, &li->image, li->desc))
+        return TISPEECH_E_NOLANGUAGE;
     if (language == TISPEECH_LANG_ENGLISH) {
-        sv_image li = {sv_eng_image, sv_eng_image_va, sv_eng_image_size};
-        if (sv_langmod_init(m, &li, sv_eng_image_desc))
-            return TISPEECH_E_NOLANGUAGE;
         m->duration = sv_eng_duration;
-        return sv_langgen_attach(m, &li, sv_eng_image_text, sv_eng_image_text_count)
-            ? TISPEECH_E_OUTOFMEMORY : TISPEECH_OK;
-    }
-#endif
-#ifdef TISPEECH_HAVE_FRONTEND_SPAN
-    if (language == TISPEECH_LANG_SPANISH) {
-        sv_image li = {sv_span_image, sv_span_image_va, sv_span_image_size};
-        if (sv_langmod_init(m, &li, sv_span_desc_image_desc))
-            return TISPEECH_E_NOLANGUAGE;
+        m->lts = t->rules_eng;
+    } else {
         m->duration = sv_span_duration;
-        return sv_langgen_attach(m, &li, sv_span_image_text, sv_span_image_text_count)
-            ? TISPEECH_E_OUTOFMEMORY : TISPEECH_OK;
+        m->lts = t->rules_span;
     }
-#endif
-    return TISPEECH_E_NOLANGUAGE;
+    return sv_langgen_attach(m, &li->image, li->text, li->text_count)
+        ? TISPEECH_E_OUTOFMEMORY : TISPEECH_OK;
 }
 
 /* One SVTextToPhon call over the whole text, the buffer doubled until it
@@ -229,11 +415,9 @@ static int32_t text_to_phon_whole(uint32_t language, const sv_langmod *m, const 
         char *b = calloc(size, 1);
         if (!b)
             return TISPEECH_E_OUTOFMEMORY;
-#ifdef TISPEECH_HAVE_FRONTEND_SPAN
         if (language == TISPEECH_LANG_SPANISH)
             rc = sv_text_to_phon_span_ex(m, text, b, (int32_t)size, flags, dict);
         else
-#endif
             rc = sv_text_to_phon_ex(m, text, b, (int32_t)size, flags, dict);
         if (rc == 0) {
             *out = b;
@@ -248,8 +432,8 @@ static int32_t text_to_phon_whole(uint32_t language, const sv_langmod *m, const 
     }
 }
 
-static int32_t text_to_phonemes_frontend(uint32_t language, const char *text,
-                                         const sv_userdict_t *dict, uint32_t flags,
+static int32_t text_to_phonemes_frontend(const tables *t, uint32_t language,
+                                         const char *text, const sv_userdict_t *dict, uint32_t flags,
                                          char *out, int32_t size)
 {
     /* SVTextToPhon silently emits nothing above 0x202 input bytes. Expose
@@ -258,15 +442,13 @@ static int32_t text_to_phonemes_frontend(uint32_t language, const char *text,
         return TISPEECH_E_BADPARAM;
     sv_langmod m;
     char *phonemes = NULL;
-    int32_t rc = lang_open(language, &m);
+    int32_t rc = lang_open(t, language, &m);
     if (rc != TISPEECH_OK)
         return rc;
     if (flags != 0)
         rc = text_to_phon_whole(language, &m, text, flags, dict, &phonemes);
-#ifdef TISPEECH_HAVE_FRONTEND_SPAN
     else if (language == TISPEECH_LANG_SPANISH)
         rc = sv_tts_phonemes_span_ex(&m, text, 0, dict, &phonemes);
-#endif
     else
         rc = sv_tts_phonemes_ex(&m, text, 0, dict, &phonemes);
     sv_langgen_detach(&m);
@@ -280,7 +462,6 @@ static int32_t text_to_phonemes_frontend(uint32_t language, const char *text,
     free(phonemes);
     return rc;
 }
-#endif
 
 int32_t tispeech_userdict_load(const uint8_t *bytes, int32_t size,
                                tispeech_userdict **out_dict)
@@ -324,6 +505,7 @@ int32_t tispeech_text_to_phonemes_flags(uint32_t language, const char *text,
                                         const tispeech_userdict *dict, uint32_t flags,
                                         char *out, int32_t out_size)
 {
+    CURRENT_TABLES(t);
     const sv_ruleset_t *rules;
     char *work;
     const char *p;
@@ -336,30 +518,28 @@ int32_t tispeech_text_to_phonemes_flags(uint32_t language, const char *text,
     if (text == NULL)
         return TISPEECH_E_NULLTEXT;
 
-    rules = ruleset_for(language);
+    rules = ruleset_for(&t, language);
     if (rules == NULL)
         return TISPEECH_E_NOLANGUAGE;
     /* The dictionary lookup lives in the reconstructed front ends; the
      * matcher-only path has nowhere to consult it. */
-    if (dict != NULL && !has_frontend(language))
+    if (dict != NULL && !has_frontend(&t, language))
         return TISPEECH_E_NOTIMPL;
     if (flags & ~TISPEECH_TEXT_WORD_MARKS)
         return TISPEECH_E_BADPARAM;
-    if (flags != 0 && !has_frontend(language))
+    if (flags != 0 && !has_frontend(&t, language))
         return TISPEECH_E_NOTIMPL;
 
-    status = normalise(text, &work, has_frontend(language));
+    status = normalise(text, &work, has_frontend(&t, language));
     if (status != TISPEECH_OK)
         return status;
 
-#if defined(TISPEECH_HAVE_ENG) || defined(TISPEECH_HAVE_FRONTEND_SPAN)
-    if (has_frontend(language)) {
-        status = text_to_phonemes_frontend(language, work, (const sv_userdict_t *)dict,
+    if (has_frontend(&t, language)) {
+        status = text_to_phonemes_frontend(&t, language, work, (const sv_userdict_t *)dict,
                                            flags, out, out_size);
         free(work);
         return status;
     }
-#endif
 
     /* One call per word: the matcher stops at a space by design, so the caller
      * owns word iteration (the original front end does the same). */
@@ -401,12 +581,6 @@ int32_t tispeech_text_to_phonemes_flags(uint32_t language, const char *text,
         out[0] = '\0';
     return status;
 }
-
-#ifdef TISPEECH_HAVE_SYNTH_ENG
-extern const uint8_t sv_base_image[];
-extern const uint32_t sv_base_image_va, sv_base_image_size;
-extern const sv_frame_tables sv_base_tables;
-extern const sv_expr_tables sv_base_tables_expression;
 
 struct pcm_buffer {
     uint8_t *data;
@@ -475,17 +649,16 @@ static void event_append(void *ctx, const sv_narrate_event *ev)
     b->n++;
 }
 
-static int32_t synthesize_lang(uint32_t language, const char *phonemes,
+static int32_t synthesize_lang(const tables *t, uint32_t language, const char *phonemes,
                                const tispeech_voice_options *options, uint32_t event_flags,
                                struct pcm_buffer *out, struct event_buffer *events)
 {
-    sv_image bi = {sv_base_image, sv_base_image_va, sv_base_image_size};
-    sv_nar_tables tables;
+    sv_nar_tables base;
     sv_langmod eng;
     int32_t status;
-    if (sv_nar_tables_init(&tables, &bi))
+    if (sv_nar_tables_init(&base, &t->base_image))
         return TISPEECH_E_NOLANGUAGE;
-    status = lang_open(language, &eng);
+    status = lang_open(t, language, &eng);
     if (status != TISPEECH_OK)
         return status;
     sv_engine *e = calloc(1, sizeof *e);
@@ -493,16 +666,16 @@ static int32_t synthesize_lang(uint32_t language, const char *phonemes,
         sv_langgen_detach(&eng);
         return TISPEECH_E_OUTOFMEMORY;
     }
-    e->base = &tables;
-    e->frame_tables = &sv_base_tables;
-    e->expr_tables = &sv_base_tables_expression;
+    e->base = &base;
+    e->frame_tables = t->frames;
+    e->expr_tables = t->expr;
     /* TIBASE32 0x1c012038: a module's slot is its language id - 1. */
     e->modules[eng.id - 1] = &eng;
     e->lang = &eng;
     e->lang_primary = &eng;
     e->phonemes = eng.phonemes_a;
     unsigned row = options ? (unsigned)options->personality : 0;
-    sv_voice_load(e, tables.voices, row);
+    sv_voice_load(e, base.voices, row);
     /* SVSetPersonality, TIBASE32 0x1c00ec30, switch at 0x1c00ec78.
      * Only these four personalities select the alternate phoneme table. */
     if (row == 1 || row == 5 || row == 13 || row == 15)
@@ -548,7 +721,6 @@ static int32_t synthesize_lang(uint32_t language, const char *phonemes,
     free(e);
     return status;
 }
-#endif
 
 int32_t tispeech_synthesize(uint32_t language, const char *phonemes,
                             uint8_t **out_samples, int32_t *out_count,
@@ -597,8 +769,11 @@ static int32_t synthesize_common(uint32_t language, const char *phonemes,
         || !valid_override(options->vowel_factor, 0, 65535)
         || !valid_override(options->glottal_source, 0, 8)))
         return TISPEECH_E_BADPARAM;
-#ifdef TISPEECH_HAVE_SYNTH_ENG
-    if ((language & TISPEECH_SYNTH_BUILT) == 0 || (language & (language - 1)) != 0)
+    CURRENT_TABLES(t);
+    uint32_t synth = synth_languages(&t);
+    if (synth == 0)
+        return TISPEECH_E_NOTIMPL;
+    if ((language & synth) == 0 || (language & (language - 1)) != 0)
         return TISPEECH_E_NOLANGUAGE;
     /* The phoneme alphabet is 7-bit. */
     for (const char *p = phonemes; *p; p++)
@@ -606,7 +781,7 @@ static int32_t synthesize_common(uint32_t language, const char *phonemes,
             return TISPEECH_E_BADPARAM;
     struct pcm_buffer b = {NULL, 0, 0, 0};
     struct event_buffer ev = {NULL, 0, 0, 0};
-    int32_t status = synthesize_lang(language, phonemes, options, event_flags, &b,
+    int32_t status = synthesize_lang(&t, language, phonemes, options, event_flags, &b,
                                      out_events ? &ev : NULL);
     if (status != TISPEECH_OK || b.n > INT32_MAX || ev.n > INT32_MAX) {
         free(b.data);
@@ -621,11 +796,6 @@ static int32_t synthesize_common(uint32_t language, const char *phonemes,
         *out_event_count = (int32_t)ev.n;
     }
     return TISPEECH_OK;
-#else
-    (void)language;
-    (void)event_flags;
-    return TISPEECH_E_NOTIMPL;
-#endif
 }
 
 int32_t tispeech_synthesize_ex(uint32_t language, const char *phonemes,

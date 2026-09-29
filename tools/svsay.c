@@ -2,13 +2,15 @@
  * svsay — synthesise a SoftVoice phoneme string (or plain text, through the
  * letter-to-sound stage) to a WAV file with libtispeech.
  *
- *   svsay [-t] "PHONEMES OR TEXT" out.wav
+ *   svsay [-d DLLDIR] [-t] [-s] "PHONEMES OR TEXT" out.wav
  *
  * Without -t the argument is a phoneme string, e.g. " /HEH5LOW WER5LD", and
  * the output is sample-exact with the original engine. With -t the text goes
  * through the reconstructed English front end, including number expansion,
  * exception pronunciations and stress. Text is UTF-8 restricted to Latin-1,
  * at most 514 characters. Inline synthesis commands are not yet supported.
+ * -d reads the tables from the original DLLs in DLLDIR (tispeech_load_dlls);
+ * without it the library must have been built with them.
  */
 
 #include "tispeech/capi.h"
@@ -33,19 +35,30 @@ static void put16(FILE *f, uint16_t v)
 int main(int argc, char **argv)
 {
     int text = 0, i = 1;
+    const char *dlls = NULL;
     uint32_t language = TISPEECH_LANG_ENGLISH;
     for (; i < argc && argv[i][0] == '-' && argv[i][1] && !argv[i][2]; i++) {
         if (argv[i][1] == 't')
             text = 1;
         else if (argv[i][1] == 's')
             language = TISPEECH_LANG_SPANISH;
+        else if (argv[i][1] == 'd' && i + 1 < argc)
+            dlls = argv[++i];
         else
             break;
     }
     if (argc - i != 2) {
-        fprintf(stderr, "usage: svsay [-t] [-s] \"PHONEMES OR TEXT\" out.wav\n"
+        fprintf(stderr, "usage: svsay [-d DLLDIR] [-t] [-s] \"PHONEMES OR TEXT\" out.wav\n"
+                        "  -d  read the tables from the original DLLs in DLLDIR\n"
                         "  -t  convert text first; -s  Spanish (UTF-8 text)\n");
         return 2;
+    }
+    if (dlls) {
+        int32_t rc = tispeech_load_dlls(dlls);
+        if (rc != TISPEECH_OK) {
+            fprintf(stderr, "svsay: cannot load the DLLs in %s (%#x)\n", dlls, (unsigned)rc);
+            return 1;
+        }
     }
     if (!(tispeech_capabilities() & TISPEECH_CAP_SYNTHESIS)) {
         fprintf(stderr, "svsay: %s\n", tispeech_build_info());

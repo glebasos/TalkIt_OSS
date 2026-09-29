@@ -2,6 +2,7 @@
 #include "tispeech/ruleset.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define CHECK(condition) do { \
@@ -68,12 +69,54 @@ static int check_language(uint32_t language, const sv_ruleset_t *rules)
 #  define HAVE_SYNTH 0
 #endif
 
-int main(void)
+/* With the three DLL paths: synthesise with the compiled-in tables, load the
+ * same DLLs at run time, require identical output, then run everything below
+ * against the loaded tables. */
+static int check_loaded(char **dlls)
+{
+    static const struct { uint32_t language; const char *phonemes; } cases[] = {
+        {TISPEECH_LANG_ENGLISH, " /HEH5LOW WER5LD"},
+        {TISPEECH_LANG_SPANISH, " OH5LAA MUW5NDOH"},
+    };
+    uint8_t *before[2], *after;
+    int32_t count[2], n, rate;
+    char phon[2][256], again[256];
+
+    for (int i = 0; i < 2; i++) {
+        CHECK(tispeech_synthesize(cases[i].language, cases[i].phonemes, &before[i], &count[i],
+                                  &rate) == TISPEECH_OK);
+        CHECK(tispeech_text_to_phonemes(cases[i].language,
+                                        i ? "hola 42, caf\xc3\xa9" : "Hello 1996, world.",
+                                        phon[i], sizeof phon[i]) == TISPEECH_OK);
+    }
+    CHECK(tispeech_load_dll_files(NULL, NULL, NULL) == TISPEECH_E_BADPARAM);
+    CHECK(tispeech_load_dll_files(dlls[1], NULL, NULL) == TISPEECH_E_BADDLL);
+    CHECK(tispeech_load_dlls("/nonexistent") == TISPEECH_E_NOLANGUAGE);
+    CHECK(tispeech_load_dll_files(dlls[0], dlls[1], dlls[2]) == TISPEECH_OK);
+    for (int i = 0; i < 2; i++) {
+        CHECK(tispeech_synthesize(cases[i].language, cases[i].phonemes, &after, &n, &rate)
+              == TISPEECH_OK);
+        CHECK(n == count[i] && memcmp(after, before[i], (size_t)n) == 0);
+        tispeech_free_samples(after);
+        tispeech_free_samples(before[i]);
+        CHECK(tispeech_text_to_phonemes(cases[i].language,
+                                        i ? "hola 42, caf\xc3\xa9" : "Hello 1996, world.",
+                                        again, sizeof again) == TISPEECH_OK);
+        CHECK(strcmp(again, phon[i]) == 0);
+    }
+    return 0;
+}
+
+int main(int argc, char **argv)
 {
     char output[64];
     uint8_t *samples = (uint8_t *)output;
     int32_t count = 123, rate = 123;
-    uint32_t languages = tispeech_languages();
+    uint32_t languages;
+
+    if (argc == 4 && check_loaded(argv + 1) != 0)
+        return 1;
+    languages = tispeech_languages();
 
     CHECK(!(tispeech_capabilities() & TISPEECH_CAP_SYNTHESIS) == !HAVE_SYNTH);
     CHECK(!!(tispeech_capabilities() & TISPEECH_CAP_TEXT_TO_PHONEMES) == !!languages);

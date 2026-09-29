@@ -39,6 +39,7 @@
 
 #include "tispeech/expression.h"
 #include "tispeech/frames.h"
+#include "tispeech/ruleset.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -84,6 +85,9 @@ typedef struct sv_langmod {
     const uint8_t *voices;                  /* +0x20  74-byte rows       */
     const uint8_t *rules;                   /* +0x24  16-byte rules      */
     void *priv;                             /* language-private state    */
+    /* Not part of the original descriptor: the module's letter-to-sound
+     * tables, for the front ends that consult them directly (Spanish). */
+    const sv_ruleset_t *lts;
 } sv_langmod;
 
 static inline uint32_t sv_rd32(const uint8_t *p)

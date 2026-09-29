@@ -63,7 +63,7 @@ target_include_directories(tispeech_userdict PUBLIC include)
 
 add_library(tispeech_narrate STATIC
     src/narrate.c src/duration_eng.c src/duration_span.c src/langgen.c src/engine.c src/expression.c
-    src/textphon_eng.c)
+    src/textphon_eng.c src/textphon_span.c src/dllload.c)
 target_link_libraries(tispeech_narrate PUBLIC tispeech_smoothing tispeech_frames tispeech_rules tispeech_userdict)
 
 # Both test binaries run without any DLL: their fixtures are synthetic. The
@@ -209,8 +209,6 @@ if(TISPEECH_BASE_DLL AND TISPEECH_ENG_DLL)
     add_library(tispeech_synth_eng STATIC "${_base_img}")
     target_link_libraries(tispeech_synth_eng PUBLIC tispeech_narrate tispeech_base_data)
 
-    add_executable(svsay tools/svsay.c)
-    target_link_libraries(svsay PRIVATE tispeech_shared)
 endif()
 
 if(TISPEECH_SPAN_DLL)
@@ -265,7 +263,7 @@ if(TISPEECH_ENG_DLL AND TISPEECH_SPAN_DLL)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_generator.py"
                 "${TISPEECH_ENG_DLL}" "${TISPEECH_SPAN_DLL}"
         COMMENT "Building the merged Spanish generator/front-end image")
-    add_library(tispeech_frontend_span STATIC src/textphon_span.c "${_span_img}")
+    add_library(tispeech_frontend_span STATIC "${_span_img}")
     target_link_libraries(tispeech_frontend_span PUBLIC tispeech_narrate tispeech_lang_span)
 
     add_executable(svphon_span tools/svphon_span.c)
@@ -286,12 +284,24 @@ set_target_properties(tispeech_shared PROPERTIES
     C_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
 target_include_directories(tispeech_shared PUBLIC include)
+# The whole engine is always built; the tables are compiled in below when the
+# DLLs were given at configure time, and otherwise come from
+# tispeech_load_dlls() at run time.
+target_link_libraries(tispeech_shared PRIVATE tispeech_narrate)
+
+add_executable(svsay tools/svsay.c)
+target_link_libraries(svsay PRIVATE tispeech_shared)
+# Find libtispeech next to svsay, in the build tree and wherever both are copied.
+if(APPLE)
+    set_target_properties(svsay PROPERTIES INSTALL_RPATH "@loader_path")
+else()
+    set_target_properties(svsay PROPERTIES INSTALL_RPATH "$ORIGIN")
+endif()
+set_target_properties(svsay PROPERTIES BUILD_WITH_INSTALL_RPATH ON)
 
 if(TISPEECH_ENG_DLL)
     target_link_libraries(tispeech_shared PRIVATE tispeech_lang_eng tispeech_frontend_eng)
     target_compile_definitions(tispeech_shared PRIVATE TISPEECH_HAVE_ENG=1)
-elseif(NOT TISPEECH_SPAN_DLL)
-    target_link_libraries(tispeech_shared PRIVATE tispeech_rules)
 endif()
 
 if(TISPEECH_SPAN_DLL)
@@ -299,12 +309,6 @@ if(TISPEECH_SPAN_DLL)
         target_link_libraries(tispeech_shared PRIVATE tispeech_lang_span)
     endif()
     target_compile_definitions(tispeech_shared PRIVATE TISPEECH_HAVE_SPAN=1)
-endif()
-
-# tispeech_userdict_load/free are exported whatever language data is built;
-# the front ends already bring userdict in through tispeech_narrate.
-if(NOT TISPEECH_ENG_DLL AND NOT TARGET tispeech_frontend_span)
-    target_link_libraries(tispeech_shared PRIVATE tispeech_userdict)
 endif()
 
 if(TARGET tispeech_synth_eng)
@@ -346,6 +350,22 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_capi.c")
         endif()
     endif()
     add_test(NAME capi COMMAND test_capi)
+    # The same suite on tables read at run time from the same DLLs, after
+    # checking they synthesise exactly what the compiled-in ones do.
+    if(TARGET tispeech_synth_eng AND TARGET tispeech_frontend_span)
+        add_test(NAME capi_loaded COMMAND test_capi
+            "${TISPEECH_BASE_DLL}" "${TISPEECH_ENG_DLL}" "${TISPEECH_SPAN_DLL}")
+    endif()
+endif()
+
+# The run-time loader against the build-time extractors, byte for byte.
+if(TARGET tispeech_synth_eng AND TARGET tispeech_frontend_span)
+    add_executable(test_dllload tests/test_dllload.c)
+    target_link_libraries(test_dllload PRIVATE tispeech_synth_eng tispeech_frontend_eng
+        tispeech_frontend_span tispeech_span_desc tispeech_lang_eng tispeech_lang_span
+        tispeech_base_data)
+    add_test(NAME dllload COMMAND test_dllload
+        "${TISPEECH_BASE_DLL}" "${TISPEECH_ENG_DLL}" "${TISPEECH_SPAN_DLL}")
 endif()
 
 # Development-only oracles. These separate shared libraries expose internal C

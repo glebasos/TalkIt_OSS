@@ -10,9 +10,12 @@ are not reconstructed return `SV_E_NOTIMPL` rather than pretending to work.
 ## Ground rules
 
 1. **No proprietary bytes in git.** The DLLs are SoftVoice, Inc. property. Rule
-   tables and coefficient data are extracted at build time from a copy the user
-   already owns (`tools/extract_lang.py`) into the build tree. The DLLs are
-   parsed as files — never mapped, relocated, or executed.
+   tables and coefficient data are read from a copy the user already owns:
+   at build time by `tools/extract_*.py` into the build tree, or at run time
+   by `src/dllload.c` (`tispeech_load_dlls`), a C port of the same extractors
+   that `tests/test_dllload.c` checks against them byte for byte. The release
+   binaries carry no tables. The DLLs are parsed as files — never mapped,
+   relocated, or executed.
 2. **Every reconstructed function cites its source address.** If you cannot
    point at the disassembly, it does not go in.
 3. **Bit-exact agreement with the original is the goal.** Where our output
@@ -1000,11 +1003,15 @@ what gets built:
 | `TISPEECH_ENG_DLL` | English front-end images, rule data, generator tables, `svphon`, `ruleset` test, real-inventory generator tests |
 | `TISPEECH_SPAN_DLL` | Spanish rule data and Spanish ABI checks in `capi` |
 | `TISPEECH_BASE_DLL` | base coefficient tables, `frames` test |
-| `TISPEECH_BASE_DLL` + `TISPEECH_ENG_DLL` | English synthesis data (`.data` images), `tispeech_synthesize`, `svsay` |
+| `TISPEECH_BASE_DLL` + `TISPEECH_ENG_DLL` | English synthesis data (`.data` images) compiled into `tispeech_synthesize` and `svsay` |
+| all three | `dllload` (run-time loader vs. extractors) and `capi_loaded` (the `capi` suite on loaded tables, after checking they synthesise identically) |
 
 The library code always compiles without any DLLs: callers supply the tables at
 the C boundary. Only the generated data libraries and the tests that need them
-are gated. Python is required only when at least one DLL is set.
+are gated. Python is required only when at least one DLL is set. A build with
+no DLLs is complete: `libtispeech` and `svsay` take the tables from
+`tispeech_load_dlls()` / `svsay -d` at run time, which is how the releases
+(`tools/build_release.sh`, `.github/workflows/build.yml`) are built.
 
 `libtispeech` (`src/capi.c`, `include/tispeech/capi.h`) is the ABI the .NET side
 P/Invokes. It is deliberately separate from `svapi.h`: `svapi.h` reconstructs

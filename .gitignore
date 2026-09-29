@@ -31,3 +31,7 @@ cmake-build-*/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Release builds (tools/build_release.sh)
+build-release/
+dist/

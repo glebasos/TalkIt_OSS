@@ -1,0 +1,123 @@
+# Builds the redistributable libtispeech + svsay (tools/build_release.sh),
+# smoke-tests each binary on its own OS, runs the DLL-free test suite, and on a
+# v* tag publishes the archives as a GitHub release.
+#
+# No SoftVoice DLL is available here or needed: the binaries contain no tables
+# and read them from the user's own DLLs at run time (tispeech_load_dlls).
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-cross:
+    name: build (linux, windows)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: |
+          for rid in linux-x64 linux-arm64 win-x64; do
+            tools/build_release.sh "$rid"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-cross
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+  build-macos:
+    name: build (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          for rid in osx-arm64 osx-x64; do
+            tools/build_release.sh "$rid"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos
+          path: dist/*.tar.gz
+
+  # Load each binary on its own OS. Without DLLs svsay must refuse and say why;
+  # with a directory that has none, loading must fail cleanly.
+  smoke:
+    needs: [build-cross, build-macos]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    rid: linux-x64 }
+          - { os: ubuntu-24.04-arm, rid: linux-arm64 }
+          - { os: windows-latest,   rid: win-x64 }
+          - { os: macos-latest,     rid: osx-arm64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+      - run: |
+          mkdir pkg
+          if [ -f "tispeech-${{ matrix.rid }}.zip" ]; then
+            (cd pkg && unzip -q "../tispeech-${{ matrix.rid }}.zip")
+          else
+            tar -xzf "tispeech-${{ matrix.rid }}.tar.gz" -C pkg
+          fi
+          ls -la pkg
+          set +e
+          out=$(pkg/svsay "hello" out.wav 2>&1); rc=$?
+          echo "$out"
+          [ $rc -eq 1 ] && echo "$out" | grep -q "no language data" || exit 1
+          mkdir empty
+          out=$(pkg/svsay -d empty "hello" out.wav 2>&1); rc=$?
+          echo "$out"
+          [ $rc -eq 1 ] && echo "$out" | grep -q "cannot load the DLLs" || exit 1
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j 4
+      - run: ctest --test-dir build --output-on-failure
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [smoke, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.tar.gz
+            *.zip
+          body: |
+            Prebuilt `libtispeech` and `svsay`. These contain no SoftVoice data: point
+            them at your own copies of the original Talk It! DLLs (`TIBASE32.DLL`,
+            `TIENG32.DLL`, `TISPAN32.DLL`) with `svsay -d DIR` or
+            `tispeech_load_dlls(DIR)`. See the README.

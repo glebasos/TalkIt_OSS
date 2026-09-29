@@ -50,6 +50,7 @@ int32_t textphon_span_oracle_text_to_phon(const uint8_t *dict_bytes, size_t dict
         sv_userdict_free(dict);
         return -9001;
     }
+    span.lts = &sv_lang_data_span;
     if (sv_langgen_attach(&span, &li, sv_span_image_text, sv_span_image_text_count)) {
         sv_userdict_free(dict);
         return -9002;
