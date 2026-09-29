@@ -2,8 +2,7 @@
 # smoke-tests each binary on its own OS, runs the DLL-free test suite, and on a
 # v* tag publishes the archives as a GitHub release.
 #
-# No SoftVoice DLL is available here or needed: the binaries contain no tables
-# and read them from the user's own DLLs at run time (tispeech_load_dlls).
+# No original DLL is needed: the binaries compile the extracted sources in data/.
 name: build
 
 on:
@@ -50,8 +49,8 @@ jobs:
           name: dist-macos
           path: dist/*.tar.gz
 
-  # Load each binary on its own OS. Without DLLs svsay must refuse and say why;
-  # with a directory that has none, loading must fail cleanly.
+  # Synthesize both languages on each OS without original DLLs. An explicit
+  # override pointing at an empty directory must still fail cleanly.
   smoke:
     needs: [build-cross, build-macos]
     strategy:
@@ -79,24 +78,25 @@ jobs:
             tar -xzf "tispeech-${{ matrix.rid }}.tar.gz" -C pkg
           fi
           ls -la pkg
-          set +e
-          out=$(pkg/svsay "hello" out.wav 2>&1); rc=$?
-          echo "$out"
-          [ $rc -eq 1 ] && echo "$out" | grep -q "no language data" || exit 1
+          pkg/svsay -t "Hello, world." english.wav
+          pkg/svsay -t -s "Hola, mundo." spanish.wav
+          test -s english.wav && test -s spanish.wav
           mkdir empty
-          out=$(pkg/svsay -d empty "hello" out.wav 2>&1); rc=$?
-          echo "$out"
-          [ $rc -eq 1 ] && echo "$out" | grep -q "cannot load the DLLs" || exit 1
+          if out=$(pkg/svsay -d empty -t "hello" out.wav 2>&1); then
+            echo "Expected an explicit empty DLL directory to fail"; exit 1
+          fi
+          echo "$out" | grep -q "cannot load the DLLs"
 
   test:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        data: ["ON", "OFF"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTISPEECH_USE_EXTRACTED_DATA=${{ matrix.data }}
       - run: cmake --build build -j 4
       - run: ctest --test-dir build --output-on-failure
 
@@ -117,7 +117,6 @@ jobs:
             *.tar.gz
             *.zip
           body: |
-            Prebuilt `libtispeech` and `svsay`. These contain no SoftVoice data: point
-            them at your own copies of the original Talk It! DLLs (`TIBASE32.DLL`,
-            `TIENG32.DLL`, `TISPAN32.DLL`) with `svsay -d DIR` or
-            `tispeech_load_dlls(DIR)`. See the README.
+            Prebuilt `libtispeech` and `svsay`, with English and Spanish speech
+            data compiled in. No original DLLs or extraction step required.
+            Try `svsay -t "Hello, world." hello.wav` (`-s` for Spanish). See the README.

@@ -15,6 +15,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#  include <windows.h>
+#endif
+
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 static uint32_t rd32(const uint8_t *p)
 {
@@ -26,6 +30,21 @@ static uint32_t rd32(const uint8_t *p)
 /* Files and allocations.                                                   */
 /* ------------------------------------------------------------------------ */
 
+FILE *sv_fopen_rb(const char *path)
+{
+#ifdef _WIN32
+    FILE *f = NULL;
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    wchar_t *wide = n > 0 ? malloc((size_t)n * sizeof *wide) : NULL;
+    if (wide && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, n) == n)
+        f = _wfopen(wide, L"rb");
+    free(wide);
+    return f;
+#else
+    return fopen(path, "rb");
+#endif
+}
+
 int sv_pe_open(sv_pe *pe, const char *path)
 {
     FILE *f;
@@ -34,7 +53,7 @@ int sv_pe_open(sv_pe *pe, const char *path)
     uint16_t optional_size;
 
     memset(pe, 0, sizeof *pe);
-    f = fopen(path, "rb");
+    f = sv_fopen_rb(path);
     if (!f)
         return -1;
     if (fseek(f, 0, SEEK_END) != 0 || (size = ftell(f)) < 0x40 || size > (64L << 20)

@@ -1,12 +1,4 @@
-# ---------------------------------------------------------------------------
-# Ground rule 1 of REVERSING.md: no proprietary bytes in git.
-#
-# The SoftVoice DLLs belong to SoftVoice, Inc. The rule tables and coefficient
-# data inside them are extracted at BUILD time, by tools/extract_*.py, from a
-# copy the user already owns, into the CMake build tree. Neither the DLLs nor
-# anything generated from them may ever be committed. These patterns are a
-# backstop, not permission to put such a file in the source tree.
-# ---------------------------------------------------------------------------
+# Original binaries and build outputs. Extracted C data under data/ is source.
 *.DLL
 *.dll
 build/
@@ -14,14 +6,12 @@ build-*/
 build_*/
 cmake-build-*/
 
-# Output of the build-time table extractors, wherever it lands. Unanchored on
-# the left: CMake writes plain base_data.c into the build tree, which a
-# *_base_data.c pattern would miss.
+# Ignore ad hoc extraction outside the bundled data directory.
 *lang_data.c
 *base_data.c
+!/data/*.c
 
-# Compiled artifacts carry the extracted tables inside them just as plainly as
-# the generated .c does.
+# Compiled artifacts are build outputs.
 *.a
 *.so
 *.dylib

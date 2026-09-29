@@ -6,26 +6,53 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 enable_testing()
 
-# ---------------------------------------------------------------------------
-# Language data.
-#
-# The letter-to-sound rules belong to SoftVoice, Inc. They are NOT in this
-# repository and must never be committed. Point TISPEECH_ENG_DLL at a copy of
-# TIENG32.DLL you already own and the table is extracted into the build tree at
-# build time. The DLL is parsed as a file; it is never loaded or executed.
-#
-#   cmake -B build -DTISPEECH_ENG_DLL=/path/to/TIENG32.DLL
-# ---------------------------------------------------------------------------
-set(TISPEECH_ENG_DLL "" CACHE FILEPATH "Path to an original TIENG32.DLL")
-set(TISPEECH_SPAN_DLL "" CACHE FILEPATH "Path to an original TISPAN32.DLL")
-set(TISPEECH_BASE_DLL "" CACHE FILEPATH "Path to an original TIBASE32.DLL")
+# Extracted speech data is ordinary C source. Normal builds need neither the
+# original DLLs nor Python. Disable this option for a data-free library or to
+# regenerate in the build tree from explicitly supplied DLLs.
+option(TISPEECH_USE_EXTRACTED_DATA "Compile the bundled English/Spanish speech data" ON)
+set(TISPEECH_ENG_DLL "" CACHE FILEPATH "Optional original TIENG32.DLL for extraction/verification")
+set(TISPEECH_SPAN_DLL "" CACHE FILEPATH "Optional original TISPAN32.DLL for extraction/verification")
+set(TISPEECH_BASE_DLL "" CACHE FILEPATH "Optional original TIBASE32.DLL for extraction/verification")
 option(TISPEECH_VERIFY_ORIGINAL "Enable development-only Unicorn differential tests" OFF)
 set(TISPEECH_VERIFY_CASES "20000" CACHE STRING "Cases per original-DLL differential test")
 
-# Extraction needs Python; a build without DLLs needs no Python at all.
-if(TISPEECH_ENG_DLL OR TISPEECH_SPAN_DLL OR TISPEECH_BASE_DLL)
+if((NOT TISPEECH_USE_EXTRACTED_DATA AND
+    (TISPEECH_ENG_DLL OR TISPEECH_SPAN_DLL OR TISPEECH_BASE_DLL)) OR TISPEECH_VERIFY_ORIGINAL)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
 endif()
+foreach(language BASE ENG SPAN)
+    set(_have_${language} OFF)
+    if(TISPEECH_USE_EXTRACTED_DATA OR TISPEECH_${language}_DLL)
+        set(_have_${language} ON)
+    endif()
+endforeach()
+
+# Keep the original extractors available for comparisons and alternate inputs.
+function(tispeech_data variable filename extractor)
+    if(TISPEECH_USE_EXTRACTED_DATA)
+        set(output "${CMAKE_CURRENT_SOURCE_DIR}/data/${filename}")
+        if(NOT EXISTS "${output}")
+            message(FATAL_ERROR "Missing extracted speech data: ${output}. Restore data/ or run tools/extract_data.py.")
+        endif()
+    else()
+        set(output "${CMAKE_CURRENT_BINARY_DIR}/${filename}")
+        set(dependencies)
+        foreach(dll BASE ENG SPAN)
+            if(TISPEECH_${dll}_DLL)
+                list(APPEND dependencies "${TISPEECH_${dll}_DLL}")
+            endif()
+        endforeach()
+        add_custom_command(OUTPUT "${output}"
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/${extractor}"
+                    ${ARGN}
+            DEPENDS ${dependencies}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/${extractor}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_generator.py"
+            VERBATIM
+            COMMENT "Extracting ${filename}")
+    endif()
+    set(${variable} "${output}" PARENT_SCOPE)
+endfunction()
 
 add_library(tispeech_rules STATIC src/ruleset.c)
 target_include_directories(tispeech_rules PUBLIC include)
@@ -56,7 +83,7 @@ target_include_directories(tispeech_generator PUBLIC include)
 # The narrate pipeline: phoneme string -> records -> prosody -> parameter
 # frames (TIBASE32 FUN_1c003870 and the language module's +0x04/+0x08), plus
 # the voice-expression pass. Compiles without proprietary data; the tables
-# arrive at run time as extracted .data images (tools/extract_images.py).
+# are supplied as extracted images (bundled by default).
 # ---------------------------------------------------------------------------
 add_library(tispeech_userdict STATIC src/userdict.c)
 target_include_directories(tispeech_userdict PUBLIC include)
@@ -67,7 +94,7 @@ add_library(tispeech_narrate STATIC
 target_link_libraries(tispeech_narrate PUBLIC tispeech_smoothing tispeech_frames tispeech_rules tispeech_userdict)
 
 # Both test binaries run without any DLL: their fixtures are synthetic. The
-# English DLL only adds the real-inventory cases inside test_generator.c.
+# English dataset adds the real-inventory cases inside test_generator.c.
 add_executable(test_smoothing tests/test_smoothing.c)
 target_link_libraries(test_smoothing PRIVATE tispeech_smoothing)
 add_test(NAME smoothing COMMAND test_smoothing)
@@ -83,30 +110,12 @@ target_link_libraries(test_userdict PRIVATE tispeech_userdict)
 add_test(NAME userdict COMMAND test_userdict)
 
 # ---------------------------------------------------------------------------
-# Base coefficient tables.
-#
-# Same rule as the language data: the resonator, amplitude, glottal, noise and
-# output-curve tables belong to SoftVoice and are NOT in this repository. Point
-# TISPEECH_BASE_DLL at a copy of TIBASE32.DLL you already own and they are
-# extracted into the build tree at build time. The DLL is parsed as a file; it
-# is never loaded or executed.
-#
-#   cmake -B build -DTISPEECH_BASE_DLL=/path/to/TIBASE32.DLL
-#
-# tispeech_frames above compiles without any of this; only the data library and
-# the frame tests are gated, exactly as test_ruleset is gated on the English DLL.
+# Base synthesis coefficients, waveforms, phoneme names and voice tables.
 # ---------------------------------------------------------------------------
-if(TISPEECH_BASE_DLL)
-    set(_base "${CMAKE_CURRENT_BINARY_DIR}/base_data.c")
-    add_custom_command(
-        OUTPUT "${_base}"
-        COMMAND ${Python3_EXECUTABLE}
-                "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_base.py"
-                "${TISPEECH_BASE_DLL}" "${_base}"
-                --symbol sv_base_tables
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_base.py"
-                "${TISPEECH_BASE_DLL}"
-        COMMENT "Extracting base coefficient tables from ${TISPEECH_BASE_DLL}")
+if(_have_BASE)
+    tispeech_data(_base base_data.c extract_base.py
+                "${TISPEECH_BASE_DLL}" "${CMAKE_CURRENT_BINARY_DIR}/base_data.c"
+                --symbol sv_base_tables)
     add_library(tispeech_base_data STATIC "${_base}")
     target_link_libraries(tispeech_base_data PUBLIC tispeech_frames)
 
@@ -126,47 +135,26 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dsp.c")
     add_test(NAME dsp COMMAND test_dsp)
 endif()
 
-if(TISPEECH_ENG_DLL)
-    set(_eng_img "${CMAKE_CURRENT_BINARY_DIR}/eng_image.c")
-    add_custom_command(
-        OUTPUT "${_eng_img}"
-        COMMAND ${Python3_EXECUTABLE}
-                "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_images.py"
-                "${TISPEECH_ENG_DLL}" "${_eng_img}" --symbol sv_eng_image
+if(_have_ENG)
+    tispeech_data(_eng_img eng_image.c extract_images.py
+                "${TISPEECH_ENG_DLL}" "${CMAKE_CURRENT_BINARY_DIR}/eng_image.c" --symbol sv_eng_image
                 --language --text-range 1c205fb9:1c206780
-                --text-range 1c209c20:1c249310
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_images.py"
-                "${TISPEECH_ENG_DLL}"
-        COMMENT "Extracting TIENG32 .data from ${TISPEECH_ENG_DLL}")
+                --text-range 1c209c20:1c249310)
     add_library(tispeech_frontend_eng STATIC "${_eng_img}")
     target_link_libraries(tispeech_frontend_eng PUBLIC tispeech_narrate)
 
-    set(_gen "${CMAKE_CURRENT_BINARY_DIR}/eng_lang_data.c")
-    add_custom_command(
-        OUTPUT "${_gen}"
-        COMMAND ${Python3_EXECUTABLE}
-                "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_lang.py"
-                "${TISPEECH_ENG_DLL}" "${_gen}"
-                --symbol sv_lang_data_eng
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_lang.py"
-                "${TISPEECH_ENG_DLL}"
-        COMMENT "Extracting English rule tables from ${TISPEECH_ENG_DLL}")
+    tispeech_data(_gen eng_lang_data.c extract_lang.py
+                "${TISPEECH_ENG_DLL}" "${CMAKE_CURRENT_BINARY_DIR}/eng_lang_data.c"
+                --symbol sv_lang_data_eng)
     add_library(tispeech_lang_eng STATIC "${_gen}")
     target_link_libraries(tispeech_lang_eng PUBLIC tispeech_rules)
 
     # Generator tables: the 9x16 interpolation-rate table and the two 110-entry
-    # phoneme definition tables. Same build-time extraction contract as the
-    # rule tables above; nothing proprietary is committed.
-    set(_gen_eng "${CMAKE_CURRENT_BINARY_DIR}/eng_gen_data.c")
-    add_custom_command(
-        OUTPUT "${_gen_eng}"
-        COMMAND ${Python3_EXECUTABLE}
-                "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_generator.py"
-                "${TISPEECH_ENG_DLL}" "${_gen_eng}"
-                --language eng --symbol sv_gen_data_eng
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_generator.py"
-                "${TISPEECH_ENG_DLL}"
-        COMMENT "Extracting English generator tables from ${TISPEECH_ENG_DLL}")
+    # phoneme definition tables. Same data-source selection as the
+    # rule tables above.
+    tispeech_data(_gen_eng eng_gen_data.c extract_generator.py
+                "${TISPEECH_ENG_DLL}" "${CMAKE_CURRENT_BINARY_DIR}/eng_gen_data.c"
+                --language eng --symbol sv_gen_data_eng)
     add_library(tispeech_gen_eng STATIC "${_gen_eng}")
     target_link_libraries(tispeech_gen_eng PUBLIC tispeech_generator)
 
@@ -194,34 +182,20 @@ endif()
 # ---------------------------------------------------------------------------
 # English synthesis data: TIBASE32's and TIENG32's .data sections whole, plus
 # the tables TIENG32 embeds in .text after its frame generator. Needs both
-# DLLs. Extracted at build time, never committed.
+# language datasets. Bundled by default; optionally extracted at build time.
 # ---------------------------------------------------------------------------
-if(TISPEECH_BASE_DLL AND TISPEECH_ENG_DLL)
-    set(_base_img "${CMAKE_CURRENT_BINARY_DIR}/base_image.c")
-    add_custom_command(
-        OUTPUT "${_base_img}"
-        COMMAND ${Python3_EXECUTABLE}
-                "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_images.py"
-                "${TISPEECH_BASE_DLL}" "${_base_img}" --symbol sv_base_image
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_images.py"
-                "${TISPEECH_BASE_DLL}"
-        COMMENT "Extracting TIBASE32 .data from ${TISPEECH_BASE_DLL}")
+if(_have_BASE AND _have_ENG)
+    tispeech_data(_base_img base_image.c extract_images.py
+                "${TISPEECH_BASE_DLL}" "${CMAKE_CURRENT_BINARY_DIR}/base_image.c" --symbol sv_base_image)
     add_library(tispeech_synth_eng STATIC "${_base_img}")
     target_link_libraries(tispeech_synth_eng PUBLIC tispeech_narrate tispeech_base_data)
 
 endif()
 
-if(TISPEECH_SPAN_DLL)
-    set(_span "${CMAKE_CURRENT_BINARY_DIR}/span_lang_data.c")
-    add_custom_command(
-        OUTPUT "${_span}"
-        COMMAND ${Python3_EXECUTABLE}
-                "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_lang.py"
-                "${TISPEECH_SPAN_DLL}" "${_span}"
-                --language span --symbol sv_lang_data_span
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_lang.py"
-                "${TISPEECH_SPAN_DLL}"
-        COMMENT "Extracting Spanish rule tables from ${TISPEECH_SPAN_DLL}")
+if(_have_SPAN)
+    tispeech_data(_span span_lang_data.c extract_lang.py
+                "${TISPEECH_SPAN_DLL}" "${CMAKE_CURRENT_BINARY_DIR}/span_lang_data.c"
+                --language span --symbol sv_lang_data_span)
     add_library(tispeech_lang_span STATIC "${_span}")
     target_link_libraries(tispeech_lang_span PUBLIC tispeech_rules)
 
@@ -229,16 +203,9 @@ if(TISPEECH_SPAN_DLL)
     # phoneme/voice/rewrite-rule tables sv_langmod_init resolves) -- same
     # extract_images.py mechanism as English's _eng_img, no per-language
     # code needed in that tool. Independent of the merged image below.
-    set(_span_desc_img "${CMAKE_CURRENT_BINARY_DIR}/span_desc_image.c")
-    add_custom_command(
-        OUTPUT "${_span_desc_img}"
-        COMMAND ${Python3_EXECUTABLE}
-                "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_images.py"
-                "${TISPEECH_SPAN_DLL}" "${_span_desc_img}" --symbol sv_span_desc_image
-                --language
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_images.py"
-                "${TISPEECH_SPAN_DLL}"
-        COMMENT "Extracting TISPAN32 .data from ${TISPEECH_SPAN_DLL}")
+    tispeech_data(_span_desc_img span_desc_image.c extract_images.py
+                "${TISPEECH_SPAN_DLL}" "${CMAKE_CURRENT_BINARY_DIR}/span_desc_image.c" --symbol sv_span_desc_image
+                --language)
     add_library(tispeech_span_desc STATIC "${_span_desc_img}")
     target_link_libraries(tispeech_span_desc PUBLIC tispeech_narrate)
 endif()
@@ -246,23 +213,15 @@ endif()
 # ---------------------------------------------------------------------------
 # Spanish text front end (src/textphon_span.c) and frame-generator relocation
 # (src/langgen.c, shared with English — see REVERSING.md "Spanish
-# synthesis"). Needs BOTH DLLs: TISPAN32 for its own real tables,
+# synthesis"). Uses BOTH datasets: TISPAN32 for its own real tables,
 # TIENG32 because langgen.c's ~200 module globals are addressed by ITS
 # literal virtual addresses (tools/extract_span_frontend.py's header explains
 # why one merged image serves both files). Linked into tispeech_shared below.
 # ---------------------------------------------------------------------------
-if(TISPEECH_ENG_DLL AND TISPEECH_SPAN_DLL)
-    set(_span_img "${CMAKE_CURRENT_BINARY_DIR}/span_image.c")
-    add_custom_command(
-        OUTPUT "${_span_img}"
-        COMMAND ${Python3_EXECUTABLE}
-                "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_span_frontend.py"
-                "${TISPEECH_ENG_DLL}" "${TISPEECH_SPAN_DLL}" "${_span_img}"
-                --symbol sv_span_image
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_span_frontend.py"
-                "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_generator.py"
-                "${TISPEECH_ENG_DLL}" "${TISPEECH_SPAN_DLL}"
-        COMMENT "Building the merged Spanish generator/front-end image")
+if(_have_ENG AND _have_SPAN)
+    tispeech_data(_span_img span_image.c extract_span_frontend.py
+                "${TISPEECH_ENG_DLL}" "${TISPEECH_SPAN_DLL}" "${CMAKE_CURRENT_BINARY_DIR}/span_image.c"
+                --symbol sv_span_image)
     add_library(tispeech_frontend_span STATIC "${_span_img}")
     target_link_libraries(tispeech_frontend_span PUBLIC tispeech_narrate tispeech_lang_span)
 
@@ -283,9 +242,13 @@ set_target_properties(tispeech_shared PROPERTIES
     OUTPUT_NAME tispeech
     C_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
+# Avoid colliding with the managed TiSpeech.dll on case-insensitive systems.
+if(WIN32)
+    set_target_properties(tispeech_shared PROPERTIES PREFIX "lib")
+endif()
 target_include_directories(tispeech_shared PUBLIC include)
 # The whole engine is always built; the tables are compiled in below when the
-# DLLs were given at configure time, and otherwise come from
+# extracted data is enabled (the default), and otherwise can come from
 # tispeech_load_dlls() at run time.
 target_link_libraries(tispeech_shared PRIVATE tispeech_narrate)
 
@@ -299,12 +262,12 @@ else()
 endif()
 set_target_properties(svsay PROPERTIES BUILD_WITH_INSTALL_RPATH ON)
 
-if(TISPEECH_ENG_DLL)
+if(_have_ENG)
     target_link_libraries(tispeech_shared PRIVATE tispeech_lang_eng tispeech_frontend_eng)
     target_compile_definitions(tispeech_shared PRIVATE TISPEECH_HAVE_ENG=1)
 endif()
 
-if(TISPEECH_SPAN_DLL)
+if(_have_SPAN)
     if(NOT TARGET tispeech_frontend_span)   # which links it itself
         target_link_libraries(tispeech_shared PRIVATE tispeech_lang_span)
     endif()
@@ -332,11 +295,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_capi.c")
     add_executable(test_capi tests/test_capi.c)
     target_link_libraries(test_capi PRIVATE tispeech_shared)
     target_include_directories(test_capi PRIVATE include)
-    if(TISPEECH_ENG_DLL)
+    if(_have_ENG)
         target_link_libraries(test_capi PRIVATE tispeech_lang_eng)
         target_compile_definitions(test_capi PRIVATE TISPEECH_HAVE_ENG=1)
     endif()
-    if(TISPEECH_SPAN_DLL)
+    if(_have_SPAN)
         target_link_libraries(test_capi PRIVATE tispeech_lang_span)
         target_compile_definitions(test_capi PRIVATE TISPEECH_HAVE_SPAN=1)
     endif()
@@ -352,14 +315,16 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_capi.c")
     add_test(NAME capi COMMAND test_capi)
     # The same suite on tables read at run time from the same DLLs, after
     # checking they synthesise exactly what the compiled-in ones do.
-    if(TARGET tispeech_synth_eng AND TARGET tispeech_frontend_span)
+    if(TARGET tispeech_synth_eng AND TARGET tispeech_frontend_span
+       AND TISPEECH_BASE_DLL AND TISPEECH_ENG_DLL AND TISPEECH_SPAN_DLL)
         add_test(NAME capi_loaded COMMAND test_capi
             "${TISPEECH_BASE_DLL}" "${TISPEECH_ENG_DLL}" "${TISPEECH_SPAN_DLL}")
     endif()
 endif()
 
 # The run-time loader against the build-time extractors, byte for byte.
-if(TARGET tispeech_synth_eng AND TARGET tispeech_frontend_span)
+if(TARGET tispeech_synth_eng AND TARGET tispeech_frontend_span
+       AND TISPEECH_BASE_DLL AND TISPEECH_ENG_DLL AND TISPEECH_SPAN_DLL)
     add_executable(test_dllload tests/test_dllload.c)
     target_link_libraries(test_dllload PRIVATE tispeech_synth_eng tispeech_frontend_eng
         tispeech_frontend_span tispeech_span_desc tispeech_lang_eng tispeech_lang_span
@@ -426,7 +391,7 @@ if(TISPEECH_VERIFY_ORIGINAL)
         tispeech_oracle_test(original_smoothing verify_smoothing.py verify_smoothing
             --dll "${TISPEECH_BASE_DLL}" --cases "${TISPEECH_VERIFY_CASES}")
     endif()
-    if(TARGET tispeech_synth_eng)
+    if(TARGET tispeech_synth_eng AND TISPEECH_BASE_DLL AND TISPEECH_ENG_DLL)
         # The whole narrate pipeline against the original engine run end to
         # end under Unicorn: every stage boundary, then the PCM stream.
         tispeech_oracle_library(verify_narrate tools/narrate_oracle.c
@@ -464,7 +429,7 @@ if(TISPEECH_VERIFY_ORIGINAL)
     # TISPAN32's own real .data image (sv_langmod_init's descriptor), so
     # gated on tispeech_frontend_span itself (TISPEECH_ENG_DLL AND
     # TISPEECH_SPAN_DLL) rather than TISPEECH_SPAN_DLL alone.
-    if(TARGET tispeech_frontend_span AND TISPEECH_BASE_DLL)
+    if(TARGET tispeech_frontend_span AND TISPEECH_BASE_DLL AND TISPEECH_ENG_DLL AND TISPEECH_SPAN_DLL)
         tispeech_oracle_library(verify_frontend_span tools/textphon_span_oracle.c
             src/textphon_span.c src/userdict.c src/ruleset.c src/langgen.c
             src/engine.c "${_span_img}" "${_span_desc_img}" "${_span}")

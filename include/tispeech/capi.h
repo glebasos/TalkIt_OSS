@@ -11,9 +11,9 @@
  * TABLES
  * ------
  * The rule tables and synthesis coefficients belong to SoftVoice, Inc. and are
- * read from the user's own copies of the original DLLs. A build configured
- * with them (-DTISPEECH_*_DLL) has them compiled in. Any build can instead be
- * given them at run time with tispeech_load_dlls(); everything below then
+ * compiled from data/ by default, without needing original DLLs. Optional
+ * build-time extraction uses -DTISPEECH_USE_EXTRACTED_DATA=OFF and DLL paths.
+ * Any build can load them at run time with tispeech_load_dlls(); everything below then
  * reports and uses what was loaded.
  *
  * HONESTY CONTRACT
@@ -65,7 +65,8 @@ extern "C" {
 /*
  * Read the tables from the original DLLs in `dir`: TIBASE32.DLL (synthesis),
  * TIENG32.DLL (English) and TISPAN32.DLL (Spanish, which also needs
- * TIENG32.DLL), matched case-insensitively. Any subset may be present. The
+ * TIENG32.DLL), matched case-insensitively. Paths are UTF-8 on every
+ * platform, Windows included. Any subset may be present. The
  * DLLs are parsed as files; they are never loaded or executed, and they are
  * not needed after this returns.
  *
@@ -85,7 +86,7 @@ TISPEECH_API int32_t tispeech_load_dll_files(const char *tibase32, const char *t
 TISPEECH_API uint32_t tispeech_capabilities(void);
 
 /* Bitmask of TISPEECH_LANG_* whose rule data is available, compiled in or
- * loaded. Zero until a language DLL is supplied one way or the other. */
+ * loaded. Zero when neither compiled nor runtime data is available. */
 TISPEECH_API uint32_t tispeech_languages(void);
 
 /* Bitmask of TISPEECH_LANG_* that tispeech_synthesize() accepts. Zero unless

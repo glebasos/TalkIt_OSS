@@ -272,7 +272,7 @@ static char *find_file(const char *dir, const char *name)
     strcpy(path + n + 1, name);
 #ifdef _WIN32
     {
-        FILE *f = fopen(path, "rb");
+        FILE *f = sv_fopen_rb(path);
         if (f) {
             fclose(f);
             return path;

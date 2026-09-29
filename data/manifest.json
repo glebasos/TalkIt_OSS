@@ -1,0 +1,27 @@
+{
+  "format": 1,
+  "sources": {
+    "TIBASE32.DLL": {
+      "size": 79872,
+      "sha256": "9297f69236b296238096baa1e9d00567fc74409b5a7ebe2565da71b27fcdc5cb"
+    },
+    "TIENG32.DLL": {
+      "size": 324608,
+      "sha256": "4e261dcdf4eca118cf75c39b2f52d5b00888de820df9e4e868183a039f25e98b"
+    },
+    "TISPAN32.DLL": {
+      "size": 66560,
+      "sha256": "ccc3c0b35b42ef40e116a8ba5e6f40c1f303e00f6d6c31c9a9eac5994b1d5294"
+    }
+  },
+  "outputs": {
+    "base_data.c": "efd878389e7cd330675d75ea0daef5aa4c19f99ea455dc5f78897a07a139adea",
+    "base_image.c": "94d4eba82be06fc04ffab9325cc587cc8df50eb892bf5c1a7882e58cc9515afb",
+    "eng_lang_data.c": "075ee1145949ef55ffc8312fd9bbef3f0e5b1bf4aba6c3cd5aa1edafe8094afb",
+    "eng_gen_data.c": "e1fbaccbdae195bc4744ec6eee85f6cd866f3b46857dc227ec28e686b9e70131",
+    "eng_image.c": "99d92f47a799f47bb8999a4d6ba8f88d52e0e60e10031b3b2400213a857efc8f",
+    "span_lang_data.c": "8a4cbafcd29b15685ed7765fef5f418ad70f2e6ae7b5bbfa71d9b72717d7b813",
+    "span_desc_image.c": "cfaf8b35565181603ee881e3c12ad221f3fa5c89887ab48a51ec72c4f48fa232",
+    "span_image.c": "8475f79a548323c33f8d7d27e5dfcd46374b4c244370ad643317488ebf7cbb46"
+  }
+}

@@ -1,3 +1,6 @@
+> Build/data workflow: `data/` is now bundled by default. Older build-time
+> extraction descriptions below document the optional DLL extraction path.
+
 # TiSpeech native — reverse-engineering notes
 
 Reconstruction of the SoftVoice speech engine (`TIBASE32.DLL` + language
@@ -9,13 +12,13 @@ are not reconstructed return `SV_E_NOTIMPL` rather than pretending to work.
 
 ## Ground rules
 
-1. **No proprietary bytes in git.** The DLLs are SoftVoice, Inc. property. Rule
-   tables and coefficient data are read from a copy the user already owns:
-   at build time by `tools/extract_*.py` into the build tree, or at run time
-   by `src/dllload.c` (`tispeech_load_dlls`), a C port of the same extractors
-   that `tests/test_dllload.c` checks against them byte for byte. The release
-   binaries carry no tables. The DLLs are parsed as files — never mapped,
-   relocated, or executed.
+1. **Speech data is extracted once.** `data/` holds the SoftVoice tables and
+   images consumed by the reconstructed engine; normal builds compile them
+   directly without original DLLs or Python. `tools/extract_data.py` refreshes
+   them and records source/output hashes. The original DLLs remain external
+   verification inputs. `src/dllload.c` and `tests/test_dllload.c` retain the
+   runtime extraction and byte-for-byte comparison paths. The DLLs are parsed
+   as files, never executed by the portable engine. See `data/README.md`.
 2. **Every reconstructed function cites its source address.** If you cannot
    point at the disassembly, it does not go in.
 3. **Bit-exact agreement with the original is the goal.** Where our output

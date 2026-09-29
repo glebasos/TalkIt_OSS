@@ -2,9 +2,8 @@
 # build_release.sh RID [OUTDIR]
 #
 # Build the redistributable libtispeech and svsay for one runtime identifier:
-# osx-arm64, osx-x64, linux-x64, linux-arm64 or win-x64. No DLL is involved, so
-# the result contains no SoftVoice data; it reads the tables from the user's
-# own DLLs at run time (tispeech_load_dlls, svsay -d).
+# osx-arm64, osx-x64, linux-x64, linux-arm64 or win-x64. Speech data is compiled
+# from data/; no original DLL or extraction step is needed.
 #
 # Linux and Windows targets cross-compile with `zig cc` (glibc 2.28 baseline),
 # so every RID builds from any host with zig and cmake; the macOS ones need a
@@ -19,6 +18,9 @@ mkdir -p "$OUT" "$BUILD/tc"
 
 # No debug info, and no build-machine paths in what does remain (__FILE__).
 args=(-S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release
+      -DTISPEECH_USE_EXTRACTED_DATA=ON
+      -DTISPEECH_BASE_DLL= -DTISPEECH_ENG_DLL= -DTISPEECH_SPAN_DLL=
+      -DTISPEECH_VERIFY_ORIGINAL=OFF
       "-DCMAKE_C_FLAGS=-g0 -ffile-prefix-map=$ROOT=.")
 zigcc() {   # wrapper scripts: CMake rejects a compiler with arguments
     printf '#!/bin/sh\nexec zig cc -target %s "$@"\n' "$1" > "$BUILD/tc/cc"

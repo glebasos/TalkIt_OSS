@@ -13,19 +13,13 @@ user dictionaries (`SVXF`) are supported.
 
 The .NET bindings live in [TiSpeech](https://github.com/glebasos/TiSpeech).
 
-## You need the original DLLs
+## Speech data included
 
-The rule tables and synthesis coefficients belong to SoftVoice, Inc. and are
-**not** in this repository or in the prebuilt binaries. The library reads them
-from copies of the DLLs you already own, from an installed Talk It!:
-
-| DLL | Enables |
-|---|---|
-| `TIBASE32.DLL` | synthesis (with a language) |
-| `TIENG32.DLL` | English |
-| `TISPAN32.DLL` | Spanish (needs `TIENG32.DLL` too) |
-
-The DLLs are parsed as files. They are never loaded or executed.
+English and Spanish speech data is extracted into [`data/`](data/README.md)
+and compiled directly into the library: pronunciation rules and dictionaries,
+phoneme definitions, voice presets, prosody, waveforms and synthesis coefficients.
+Normal builds and use need no original DLLs, Python or runtime extraction.
+The native C library is still built for each target platform.
 
 ## Prebuilt binaries
 
@@ -35,15 +29,13 @@ Download `tispeech-<platform>` from
 `svsay` and `include/tispeech/capi.h`.
 
 ```sh
-./svsay -d /path/to/dlls -t "Hello, world." hello.wav     # -s for Spanish
+./svsay -t "Hello, world." hello.wav     # -s for Spanish
 ```
 
 From C, or any language with a C FFI:
 
 ```c
 #include "tispeech/capi.h"
-
-tispeech_load_dlls("/path/to/dlls");          /* once, before anything else */
 
 char phonemes[4096];
 uint8_t *pcm;
@@ -55,7 +47,7 @@ tispeech_free_samples(pcm);
 ```
 
 `tispeech_capabilities()` and `tispeech_synthesis_languages()` report what the
-loaded DLLs enable. `capi.h` documents every call: voice options, events and
+compiled or explicitly loaded data enables. `capi.h` documents every call: voice options, events and
 user dictionaries.
 
 ## Build from source
@@ -67,17 +59,27 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target tispeech_shared svsay
 ```
 
-That build reads the DLLs at run time, like the releases.
+That build includes both languages, like releases built from this source.
 `tools/build_release.sh <platform>` produces the release archives, cross-compiling
 Linux and Windows with `zig cc`.
 
-To compile the tables in, or to run the differential tests against the original
-engine, give the DLLs at configure time. Extraction then needs Python 3.
+To refresh the bundled data, run `python3 tools/extract_data.py /path/to/dlls`.
+See [data/README.md](data/README.md) for its inventory and reproducibility manifest.
+
+Original DLLs are optional development inputs. Supplying them at configure time
+adds byte-for-byte data and sample-for-sample audio comparisons against the
+runtime loader. Add `-DTISPEECH_VERIFY_ORIGINAL=ON` for the Unicorn differential
+tests (Python, Unicorn and pefile required).
 
 ```sh
 cmake -S . -B build -DTISPEECH_BASE_DLL=/path/TIBASE32.DLL \
   -DTISPEECH_ENG_DLL=/path/TIENG32.DLL -DTISPEECH_SPAN_DLL=/path/TISPAN32.DLL
 ```
+
+For a data-free library, configure with `-DTISPEECH_USE_EXTRACTED_DATA=OFF`
+and no DLL paths. The optional `tispeech_load_dlls()` API and `svsay -d DIR`
+remain available. With the same option and DLL paths, the original build-time
+extraction is used instead (Python 3 required).
 
 Input is limited to 514 Latin-1 characters per call. See
 [REVERSING.md](REVERSING.md) for reconstructed addresses, build options and

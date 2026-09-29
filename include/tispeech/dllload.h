@@ -21,6 +21,7 @@
 #include "tispeech/ruleset.h"
 
 #include <stddef.h>
+#include <stdio.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -39,6 +40,10 @@ typedef struct sv_pe {
         uint32_t rva, vsize, rawsize, rawoff;
     } sections[32];
 } sv_pe;
+
+/* fopen(path, "rb") with `path` in UTF-8 on every platform (Windows' fopen
+ * would read it in the ANSI code page). */
+FILE *sv_fopen_rb(const char *path);
 
 /* 0 on success; -1 if the file cannot be read or is not an i386 PE image. */
 int sv_pe_open(sv_pe *pe, const char *path);
